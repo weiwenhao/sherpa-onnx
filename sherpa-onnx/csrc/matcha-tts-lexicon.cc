@@ -313,6 +313,28 @@ class MatchaTtsLexicon::Impl {
     return ans;
   }
 
+  TokenIDs ConvertExternalTokensToTokenIds(
+      const std::vector<std::string> &tokens) const {
+    auto ids = ConvertTokensToIds(token2id_, tokens);
+    if (ids.empty()) {
+      return {};
+    }
+
+    if (debug_) {
+      std::ostringstream os;
+      std::string sep;
+      os << "external tokens: [";
+      for (const auto &token : tokens) {
+        os << sep << token;
+        sep = ", ";
+      }
+      os << "]";
+      SHERPA_ONNX_LOGE("%s", os.str().c_str());
+    }
+
+    return TokenIDs{ids};
+  }
+
  private:
   std::vector<int32_t> ConvertWordToIds(const std::string &w) const {
     std::vector<int32_t> ans;
@@ -479,6 +501,11 @@ MatchaTtsLexicon::MatchaTtsLexicon(Manager *mgr, const std::string &lexicon,
 std::vector<TokenIDs> MatchaTtsLexicon::ConvertTextToTokenIds(
     const std::string &text, const std::string & /*unused_voice = ""*/) const {
   return impl_->ConvertTextToTokenIds(text);
+}
+
+TokenIDs MatchaTtsLexicon::ConvertExternalTokensToTokenIds(
+    const std::vector<std::string> &tokens) const {
+  return impl_->ConvertExternalTokensToTokenIds(tokens);
 }
 
 #if __ANDROID_API__ >= 9

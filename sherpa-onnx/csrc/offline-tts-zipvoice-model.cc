@@ -66,7 +66,7 @@ class OfflineTtsZipvoiceModel::Impl {
 
   Ort::Value Run(Ort::Value tokens, Ort::Value prompt_tokens,
                  Ort::Value prompt_features, float speed, int32_t num_steps,
-                 float t_shift, float guidance_scale) {
+                 float t_shift, float guidance_scale, int32_t seed) {
     std::vector<int64_t> tokens_shape =
         tokens.GetTensorTypeAndShapeInfo().GetShape();
 
@@ -89,7 +89,15 @@ class OfflineTtsZipvoiceModel::Impl {
 
     std::vector<float> x_data(batch_size * num_frames * feat_dim);
 
-    normal_gen_.Fill(x_data.data(), x_data.size());
+    if (seed >= 0) {
+      // Fresh generator per call: the same (seed, text) must always produce the
+      // same noise, otherwise a seed would only make a whole session—not a
+      // single sentence—reproducible.
+      NormalDataGenerator seeded_gen(0.0f, 1.0f, seed);
+      seeded_gen.Fill(x_data.data(), x_data.size());
+    } else {
+      normal_gen_.Fill(x_data.data(), x_data.size());
+    }
 
     auto memory_info =
         Ort::MemoryInfo::CreateCpu(OrtDeviceAllocator, OrtMemTypeDefault);
@@ -381,10 +389,11 @@ Ort::Value OfflineTtsZipvoiceModel::Run(Ort::Value tokens,
                                         float speed /*= 1.0*/,
                                         int32_t num_steps /*= 16*/,
                                         float t_shift /*= 0.5f*/,
-                                        float guidance_scale /*= 1.0f*/) const {
+                                        float guidance_scale /*= 1.0f*/,
+                                        int32_t seed /*= -1*/) const {
   return impl_->Run(std::move(tokens), std::move(prompt_tokens),
                     std::move(prompt_features), speed, num_steps, t_shift,
-                    guidance_scale);
+                    guidance_scale, seed);
 }
 
 #if __ANDROID_API__ >= 9

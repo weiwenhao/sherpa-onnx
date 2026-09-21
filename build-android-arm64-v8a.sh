@@ -16,32 +16,12 @@ if [ -z $BUILD_SHARED_LIBS ]; then
   BUILD_SHARED_LIBS=ON
 fi
 
-if [ $BUILD_SHARED_LIBS == ON ]; then
-  dir=$PWD/build-android-arm64-v8a
-else
-  dir=$PWD/build-android-arm64-v8a-static
-fi
+script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 
-if [ -n "${SHERPA_ONNXRUNTIME_LIB_DIR:-}" ] && [ -n "${SHERPA_ONNXRUNTIME_INCLUDE_DIR:-}" ]; then
-  if [ ! -d "$SHERPA_ONNXRUNTIME_LIB_DIR" ]; then
-    echo "Error: SHERPA_ONNXRUNTIME_LIB_DIR does not exist: $SHERPA_ONNXRUNTIME_LIB_DIR"
-    exit 1
-  fi
-  if [ ! -d "$SHERPA_ONNXRUNTIME_INCLUDE_DIR" ]; then
-    echo "Error: SHERPA_ONNXRUNTIME_INCLUDE_DIR does not exist: $SHERPA_ONNXRUNTIME_INCLUDE_DIR"
-    exit 1
-  fi
-  SHERPA_ONNXRUNTIME_LIB_DIR=$(cd "$SHERPA_ONNXRUNTIME_LIB_DIR" && pwd)
-  SHERPA_ONNXRUNTIME_INCLUDE_DIR=$(cd "$SHERPA_ONNXRUNTIME_INCLUDE_DIR" && pwd)
-  export SHERPA_ONNXRUNTIME_LIB_DIR
-  export SHERPA_ONNXRUNTIME_INCLUDE_DIR
-elif [ -n "${SHERPA_ONNX_ONNXRUNTIME_ROOT:-}" ] && [ "$BUILD_SHARED_LIBS" == ON ]; then
-  if [ ! -d "$SHERPA_ONNX_ONNXRUNTIME_ROOT" ]; then
-    echo "Error: SHERPA_ONNX_ONNXRUNTIME_ROOT does not exist: $SHERPA_ONNX_ONNXRUNTIME_ROOT"
-    exit 1
-  fi
-  SHERPA_ONNX_ONNXRUNTIME_ROOT=$(cd "$SHERPA_ONNX_ONNXRUNTIME_ROOT" && pwd)
-  export SHERPA_ONNX_ONNXRUNTIME_ROOT
+if [ $BUILD_SHARED_LIBS == ON ]; then
+  dir=${SHERPA_ONNX_BUILD_DIR:-$PWD/build-android-arm64-v8a}
+else
+  dir=${SHERPA_ONNX_BUILD_DIR:-$PWD/build-android-arm64-v8a-static}
 fi
 
 mkdir -p $dir
@@ -90,25 +70,57 @@ fi
 
 echo "ANDROID_NDK: $ANDROID_NDK"
 sleep 1
-onnxruntime_version=${SHERPA_ONNX_ONNXRUNTIME_VERSION:-1.28.2}
+onnxruntime_version=1.24.4
+vendored_ort_root="${script_dir}/../onnxruntime-${onnxruntime_version}"
+vendored_ort_headers_dir="${script_dir}/../onnxruntime-android-${onnxruntime_version}/headers"
+vendored_ort_lib_dir="${script_dir}/../onnxruntime-android-${onnxruntime_version}/jni/arm64-v8a"
+fallback_ort_lib_dir="${script_dir}/../jniLibs/arm64-v8a"
+vendored_ort_include_dir="${vendored_ort_root}/include/onnxruntime/core/session"
 
-if [ -n "${SHERPA_ONNXRUNTIME_LIB_DIR:-}" ] && [ -n "${SHERPA_ONNXRUNTIME_INCLUDE_DIR:-}" ]; then
-  echo "Using externally provided ONNX Runtime"
-elif [ -n "${SHERPA_ONNX_ONNXRUNTIME_ROOT:-}" ] && [ "$BUILD_SHARED_LIBS" == ON ]; then
-  export SHERPA_ONNXRUNTIME_LIB_DIR="$SHERPA_ONNX_ONNXRUNTIME_ROOT/jni/arm64-v8a/"
-  export SHERPA_ONNXRUNTIME_INCLUDE_DIR="$SHERPA_ONNX_ONNXRUNTIME_ROOT/headers/"
-elif [ "$BUILD_SHARED_LIBS" == ON ]; then
-  if [ ! -f $onnxruntime_version/jni/arm64-v8a/libonnxruntime.so ]; then
-    mkdir -p $onnxruntime_version
-    pushd $onnxruntime_version
-    wget -c -q https://github.com/csukuangfj/onnxruntime-libs/releases/download/v${onnxruntime_version}/onnxruntime-android-${onnxruntime_version}.zip
-    unzip onnxruntime-android-${onnxruntime_version}.zip
-    rm onnxruntime-android-${onnxruntime_version}.zip
-    popd
+if [ $BUILD_SHARED_LIBS == ON ]; then
+  if [ -n "${SHERPA_ONNXRUNTIME_LIB_DIR}" ] && [ -n "${SHERPA_ONNXRUNTIME_INCLUDE_DIR}" ]; then
+    echo "Use onnxruntime from environment overrides"
+  elif [ -f "${vendored_ort_lib_dir}/libonnxruntime.so" ] && [ -f "${vendored_ort_headers_dir}/onnxruntime_cxx_api.h" ]; then
+    echo "Use Android AAR onnxruntime from ${script_dir}/../onnxruntime-android-${onnxruntime_version}"
+    export SHERPA_ONNXRUNTIME_LIB_DIR="${vendored_ort_lib_dir}"
+    export SHERPA_ONNXRUNTIME_INCLUDE_DIR="${vendored_ort_headers_dir}"
+  elif [ -f "${fallback_ort_lib_dir}/libonnxruntime.so" ] && [ -f "${vendored_ort_include_dir}/onnxruntime_cxx_api.h" ]; then
+    echo "Use fallback vendored onnxruntime from ${vendored_ort_root}"
+    export SHERPA_ONNXRUNTIME_LIB_DIR="${fallback_ort_lib_dir}"
+    export SHERPA_ONNXRUNTIME_INCLUDE_DIR="${vendored_ort_include_dir}"
+  elif [ -f "${vendored_ort_include_dir}/onnxruntime_cxx_api.h" ]; then
+    echo "Use downloaded onnxruntime with source-tree headers from ${vendored_ort_root}"
+    mkdir -p "${script_dir}/../onnxruntime-android-${onnxruntime_version}/jni/arm64-v8a"
+    mkdir -p "${script_dir}/../onnxruntime-android-${onnxruntime_version}/headers"
+    if [ ! -f "${script_dir}/../onnxruntime-android-${onnxruntime_version}/jni/arm64-v8a/libonnxruntime.so" ]; then
+      if [ ! -f $onnxruntime_version/jni/arm64-v8a/libonnxruntime.so ]; then
+        mkdir -p $onnxruntime_version
+        pushd $onnxruntime_version
+        wget -c -q https://github.com/csukuangfj/onnxruntime-libs/releases/download/v${onnxruntime_version}/onnxruntime-android-${onnxruntime_version}.zip
+        unzip onnxruntime-android-${onnxruntime_version}.zip
+        rm onnxruntime-android-${onnxruntime_version}.zip
+        popd
+      fi
+
+      cp -fv $dir/$onnxruntime_version/jni/arm64-v8a/libonnxruntime.so "${script_dir}/../onnxruntime-android-${onnxruntime_version}/jni/arm64-v8a/"
+      cp -fv $dir/$onnxruntime_version/headers/*.h "${script_dir}/../onnxruntime-android-${onnxruntime_version}/headers/"
+    fi
+
+    export SHERPA_ONNXRUNTIME_LIB_DIR="${script_dir}/../onnxruntime-android-${onnxruntime_version}/jni/arm64-v8a"
+    export SHERPA_ONNXRUNTIME_INCLUDE_DIR="${script_dir}/../onnxruntime-android-${onnxruntime_version}/headers"
+  else
+    if [ ! -f $onnxruntime_version/jni/arm64-v8a/libonnxruntime.so ]; then
+      mkdir -p $onnxruntime_version
+      pushd $onnxruntime_version
+      wget -c -q https://github.com/csukuangfj/onnxruntime-libs/releases/download/v${onnxruntime_version}/onnxruntime-android-${onnxruntime_version}.zip
+      unzip onnxruntime-android-${onnxruntime_version}.zip
+      rm onnxruntime-android-${onnxruntime_version}.zip
+      popd
+    fi
+
+    export SHERPA_ONNXRUNTIME_LIB_DIR=$dir/$onnxruntime_version/jni/arm64-v8a/
+    export SHERPA_ONNXRUNTIME_INCLUDE_DIR=$dir/$onnxruntime_version/headers/
   fi
-
-  export SHERPA_ONNXRUNTIME_LIB_DIR=$dir/$onnxruntime_version/jni/arm64-v8a/
-  export SHERPA_ONNXRUNTIME_INCLUDE_DIR=$dir/$onnxruntime_version/headers/
 else
   if [ ! -f ${onnxruntime_version}-static/lib/libonnxruntime.a ]; then
     wget -c -q https://github.com/csukuangfj/onnxruntime-libs/releases/download/v${onnxruntime_version}/onnxruntime-android-arm64-v8a-static_lib-${onnxruntime_version}.zip
@@ -200,9 +212,7 @@ cmake -DCMAKE_TOOLCHAIN_FILE="$ANDROID_NDK/build/cmake/android.toolchain.cmake" 
 # make VERBOSE=1 -j4
 make -j4
 make install/strip
-if [ "$BUILD_SHARED_LIBS" == ON ]; then
-  cp -fv "$SHERPA_ONNXRUNTIME_LIB_DIR/libonnxruntime.so" install/lib
-fi
+cp -fv $onnxruntime_version/jni/arm64-v8a/libonnxruntime.so install/lib 2>/dev/null || true
 
 if [ $SHERPA_ONNX_ENABLE_RKNN == ON ]; then
   cp -fv $SHERPA_ONNX_RKNN_TOOLKIT2_LIB_DIR/librknnrt.so install/lib

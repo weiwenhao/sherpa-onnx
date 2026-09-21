@@ -32,6 +32,9 @@ class MatchaTtsLexicon : public OfflineTtsFrontend {
       const std::string &text,
       const std::string &unused_voice = "") const override;
 
+  TokenIDs ConvertExternalTokensToTokenIds(
+      const std::vector<std::string> &tokens) const;
+
  private:
   class Impl;
   std::unique_ptr<Impl> impl_;

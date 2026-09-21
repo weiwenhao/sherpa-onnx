@@ -14,6 +14,7 @@
 
 #include "kaldi-native-fbank/csrc/mel-computations.h"
 #include "kaldi-native-fbank/csrc/stft.h"
+#include "nlohmann/json.hpp"
 #include "sherpa-onnx/csrc/macros.h"
 #include "sherpa-onnx/csrc/matcha-tts-lexicon.h"
 #include "sherpa-onnx/csrc/math.h"
@@ -27,6 +28,11 @@
 #include "sherpa-onnx/csrc/vocoder.h"
 
 namespace sherpa_onnx {
+
+namespace {
+constexpr const char *kZipvoiceTextTokensKey = "zipvoice_text_tokens";
+constexpr const char *kZipvoicePromptTokensKey = "zipvoice_prompt_tokens";
+}  // namespace
 
 class OfflineTtsZipvoiceImpl : public OfflineTtsImpl {
  public:
@@ -85,11 +91,6 @@ class OfflineTtsZipvoiceImpl : public OfflineTtsImpl {
       return {};
     }
 
-    if (config.reference_text.empty()) {
-      SHERPA_ONNX_LOGE("reference_text is empty.");
-      return {};
-    }
-
     float speed =
         config.GetExtraFloat("speed", config.speed > 0 ? config.speed : 1.0f);
     if (speed <= 0) {
@@ -132,25 +133,51 @@ class OfflineTtsZipvoiceImpl : public OfflineTtsImpl {
       return {};
     }
 
-    std::vector<TokenIDs> prompt_token_ids =
-        frontend_->ConvertTextToTokenIds(config.reference_text);
-    if (prompt_token_ids.empty() ||
-        (prompt_token_ids.size() == 1 && prompt_token_ids[0].tokens.empty())) {
-#if __OHOS__
-      SHERPA_ONNX_LOGE(
-          "Failed to convert prompt text '%{public}s' to token IDs",
-          config.reference_text.c_str());
-#else
-      SHERPA_ONNX_LOGE("Failed to convert prompt text '%s' to token IDs",
-                       config.reference_text.c_str());
-#endif
+    // 上游 ZipVoice 有 --seed（默认 666）并调 fix_random_seed()，这个移植版丢了，
+    // 导致同一句话每次合成结果都不同、出问题也无法复现。这里从 extra 里补回来。
+    int32_t seed = config.GetExtraInt("seed", -1);
+
+    std::vector<int64_t> prompt_tokens;
+    bool used_custom_prompt_tokens = false;
+
+    auto prompt_token_strings = ParseExternalTokensJson(
+        config.GetExtraString(kZipvoicePromptTokensKey), kZipvoicePromptTokensKey);
+    if (!prompt_token_strings.empty()) {
+      prompt_tokens =
+          frontend_->ConvertExternalTokensToTokenIds(prompt_token_strings).tokens;
+      if (!prompt_tokens.empty()) {
+        used_custom_prompt_tokens = true;
+      } else {
+        SHERPA_ONNX_LOGE(
+            "Failed to map external prompt tokens. Falling back to frontend.");
+      }
+    }
+
+    if (!used_custom_prompt_tokens && config.reference_text.empty()) {
+      SHERPA_ONNX_LOGE("reference_text is empty.");
       return {};
     }
 
-    std::vector<int64_t> prompt_tokens;
-    for (const auto &t : prompt_token_ids) {
-      prompt_tokens.insert(prompt_tokens.end(), t.tokens.begin(),
-                           t.tokens.end());
+    if (!used_custom_prompt_tokens) {
+      std::vector<TokenIDs> prompt_token_ids =
+          frontend_->ConvertTextToTokenIds(config.reference_text);
+      if (prompt_token_ids.empty() ||
+          (prompt_token_ids.size() == 1 && prompt_token_ids[0].tokens.empty())) {
+#if __OHOS__
+        SHERPA_ONNX_LOGE(
+            "Failed to convert prompt text '%{public}s' to token IDs",
+            config.reference_text.c_str());
+#else
+        SHERPA_ONNX_LOGE("Failed to convert prompt text '%s' to token IDs",
+                         config.reference_text.c_str());
+#endif
+        return {};
+      }
+
+      for (const auto &t : prompt_token_ids) {
+        prompt_tokens.insert(prompt_tokens.end(), t.tokens.begin(),
+                             t.tokens.end());
+      }
     }
 
     std::vector<float> prompt_features = ComputePromptFeatures(
@@ -159,6 +186,32 @@ class OfflineTtsZipvoiceImpl : public OfflineTtsImpl {
     if (prompt_features.empty()) {
       SHERPA_ONNX_LOGE("No frames extracted from the prompt audio");
       return {};
+    }
+
+    auto text_token_strings = ParseExternalTokensJson(
+        config.GetExtraString(kZipvoiceTextTokensKey), kZipvoiceTextTokensKey);
+    if (!text_token_strings.empty()) {
+      auto text_tokens =
+          frontend_->ConvertExternalTokensToTokenIds(text_token_strings).tokens;
+      if (!text_tokens.empty()) {
+        GeneratedAudio result =
+            Process(text_tokens, prompt_tokens, prompt_features, speed, num_steps,
+                    feat_scale, t_shift, guidance_scale, seed);
+
+        if (config.silence_scale != 1) {
+          result = result.ScaleSilence(config.silence_scale);
+        }
+
+        if (callback && !result.samples.empty()) {
+          callback(result.samples.data(),
+                   static_cast<int32_t>(result.samples.size()), 1.0f);
+        }
+
+        return result;
+      }
+
+      SHERPA_ONNX_LOGE(
+          "Failed to map external text tokens. Falling back to frontend.");
     }
 
     auto sentences = SplitByPunctuation(text);
@@ -214,7 +267,7 @@ class OfflineTtsZipvoiceImpl : public OfflineTtsImpl {
 
       GeneratedAudio cur = GenerateChunk(
           sentences[i], prompt_tokens, prompt_features, speed, num_steps,
-          feat_scale, t_shift, guidance_scale);
+          feat_scale, t_shift, guidance_scale, seed);
 
       if (cur.samples.empty()) {
         continue;
@@ -294,6 +347,38 @@ class OfflineTtsZipvoiceImpl : public OfflineTtsImpl {
         config_.model.zipvoice.data_dir, config_.model.debug, true);
   }
 
+  std::vector<std::string> ParseExternalTokensJson(
+      const std::string &value, const std::string &key) const {
+    if (value.empty()) {
+      return {};
+    }
+
+    try {
+      auto json = nlohmann::json::parse(value);
+      if (!json.is_array()) {
+        SHERPA_ONNX_LOGE("%s must be a JSON string array", key.c_str());
+        return {};
+      }
+
+      std::vector<std::string> tokens;
+      tokens.reserve(json.size());
+
+      for (const auto &item : json) {
+        if (!item.is_string()) {
+          SHERPA_ONNX_LOGE("%s must contain only strings", key.c_str());
+          return {};
+        }
+
+        tokens.push_back(item.get<std::string>());
+      }
+
+      return tokens;
+    } catch (const nlohmann::json::parse_error &e) {
+      SHERPA_ONNX_LOGE("Failed to parse %s: %s", key.c_str(), e.what());
+      return {};
+    }
+  }
+
   void ComputeMelSpectrogram(const std::vector<float> &_samples,
                              int32_t sample_rate, float feat_scale,
                              std::vector<float> *prompt_features) const {
@@ -366,7 +451,8 @@ class OfflineTtsZipvoiceImpl : public OfflineTtsImpl {
                                const std::vector<int64_t> &prompt_tokens,
                                const std::vector<float> &prompt_features,
                                float speed, int32_t num_steps, float feat_scale,
-                               float t_shift, float guidance_scale) const {
+                               float t_shift, float guidance_scale,
+                               int32_t seed) const {
     std::vector<TokenIDs> text_token_ids =
         frontend_->ConvertTextToTokenIds(text);
 
@@ -387,7 +473,7 @@ class OfflineTtsZipvoiceImpl : public OfflineTtsImpl {
     }
 
     return Process(tokens, prompt_tokens, prompt_features, speed, num_steps,
-                   feat_scale, t_shift, guidance_scale);
+                   feat_scale, t_shift, guidance_scale, seed);
   }
 
   std::vector<float> ComputePromptFeatures(
@@ -418,7 +504,7 @@ class OfflineTtsZipvoiceImpl : public OfflineTtsImpl {
                          const std::vector<int64_t> &prompt_tokens,
                          const std::vector<float> &prompt_features, float speed,
                          int32_t num_steps, float feat_scale, float t_shift,
-                         float guidance_scale) const {
+                         float guidance_scale, int32_t seed) const {
     auto memory_info =
         Ort::MemoryInfo::CreateCpu(OrtDeviceAllocator, OrtMemTypeDefault);
 
@@ -449,7 +535,7 @@ class OfflineTtsZipvoiceImpl : public OfflineTtsImpl {
     Ort::Value mel =
         model_->Run(std::move(tokens_tensor), std::move(prompt_tokens_tensor),
                     std::move(prompt_features_tensor), speed, num_steps,
-                    t_shift, guidance_scale);
+                    t_shift, guidance_scale, seed);
 
     // Assume mel_shape = {1, T, C}
     std::vector<int64_t> mel_shape = mel.GetTensorTypeAndShapeInfo().GetShape();
@@ -481,7 +567,7 @@ class OfflineTtsZipvoiceImpl : public OfflineTtsImpl {
   OfflineTtsConfig config_;
   std::unique_ptr<OfflineTtsZipvoiceModel> model_;
   std::unique_ptr<Vocoder> vocoder_;
-  std::unique_ptr<OfflineTtsFrontend> frontend_;
+  std::unique_ptr<MatchaTtsLexicon> frontend_;
 
   std::unique_ptr<knf::MelBanks> mel_banks_;
 };

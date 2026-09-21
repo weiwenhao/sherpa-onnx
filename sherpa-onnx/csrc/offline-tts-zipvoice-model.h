@@ -25,10 +25,14 @@ class OfflineTtsZipvoiceModel {
 
   // Return a float32 tensor containing the mel
   // of shape (batch_size, mel_dim, num_frames)
+  // seed < 0 keeps the original behavior (thread-local random device), so the
+  // output differs on every call. seed >= 0 makes the initial flow-matching
+  // noise deterministic, which upstream ZipVoice exposes as `--seed` but this
+  // port used to drop; without it the same sentence cannot be reproduced.
   Ort::Value Run(Ort::Value tokens, Ort::Value prompt_tokens,
                  Ort::Value prompt_features, float speed, int32_t num_steps,
-                 float t_shift = 0.5f,
-                 float guidance_scale = 1.0f) const;
+                 float t_shift = 0.5f, float guidance_scale = 1.0f,
+                 int32_t seed = -1) const;
 
   const OfflineTtsZipvoiceModelMetaData &GetMetaData() const;
 
