@@ -15,6 +15,7 @@
 #include "sherpa-onnx/csrc/file-utils.h"
 #include "sherpa-onnx/csrc/macros.h"
 #include "sherpa-onnx/csrc/provider.h"
+#include "sherpa-onnx/csrc/swoosh-custom-op.h"
 #include "sherpa-onnx/csrc/text-utils.h"
 #if defined(__APPLE__) && (ORT_API_VERSION >= 15) && \
     !defined(SHERPA_ONNX_DISABLE_COREML)
@@ -147,6 +148,11 @@ Ort::SessionOptions GetSessionOptionsImpl(
   Provider p = StringToProvider(new_provider_str);
 
   Ort::SessionOptions sess_opts;
+
+  // ZipVoice decoder 用的是 Swoosh 融合算子（见 swoosh-custom-op.h）。
+  // 这里对所有 session 统一注册；不含该算子的模型不受影响。
+  sess_opts.Add(GetSwooshCustomOpDomain());
+
   sess_opts.SetIntraOpNumThreads(num_threads);
 
   sess_opts.SetInterOpNumThreads(num_threads);
